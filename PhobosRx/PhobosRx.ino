@@ -12,6 +12,12 @@
 
 #define CMD_ADDRPRG 0x55
 
+// === IO DEFINATIONS ====
+#define HBLED 4
+#define INTLED 5
+#define GPIO3 6
+#define GPIO4 7
+
 int stage_id=0;
 
 int rx_state=LISTEN;
@@ -21,15 +27,19 @@ int addr=0x00;
 // the setup function runs once when you press reset or power the board
 void setup() {
   // initialize digital pin LED_BUILTIN as an output.
-  pinMode(LED_BUILTIN, OUTPUT);
-  Serial.begin(115200);
+  pinMode(HBLED, OUTPUT);
+  Serial.begin(230400*4);//1Mhz UART
+  LINBRRH=0x00;
+  LINBRRL=0x00;
+  CLKPR=0x80;// the tool writes fucked out prescaler, restoring clock to full speed
+  CLKPR=0x00;
 }
 
 // the loop function runs over and over again forever
 void loop() {
-  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
+  digitalWrite(HBLED, HIGH);   // turn the LED on (HIGH is the voltage level)
   delay(250);                       // wait for a second
-  digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
+  digitalWrite(HBLED, LOW);    // turn the LED off by making the voltage LOW
   delay(250);                       // wait for a second
 }
 
@@ -71,6 +81,6 @@ void serialEvent() {
     }
   }
  void replyAck(){
-  Serial.write(addr);
-  Serial.write(RX_ACK);
+  Serial.print(addr);
+  Serial.print(RX_ACK);
  }
