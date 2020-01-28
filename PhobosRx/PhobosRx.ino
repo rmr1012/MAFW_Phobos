@@ -47,6 +47,22 @@ int heartrate;
 int HBstate;
 char lastPB;
 
+unsigned int dtSpeed;
+
+// settings vars
+struct config{ // number is num of 4us counts(256=1us)
+  unsigned char onDelayN=75;  // 75 = 300us
+  unsigned char onDelayP=25;   //p is after N, how long?
+  unsigned char offDelay=100;  //off >> onD + onP - expected meter PW
+};
+struct config stageConfig;
+enum T0Actions{
+  NHIGH,
+  PHIGH,
+  PNLOW,
+  NONE
+};
+enum T0Actions T0Action=NONE;
 
 // Function Pototype
 void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3")));
@@ -134,10 +150,30 @@ void initGlobalVars(){
   lastPB=0x00;
 }
 
-void initPCINT(){
+void initialize_PCINT(){
+  
   PCICR|= 1<<PCIE1; // pcint enable, bank 1 aka port b
-  PCMSK1|= 1<<PCINT0 | 1<<PCINT1; // pcint active pins Pb0 Pb1
+  PCMSK1|= 0x03;//1<<PCINT8 | 1<<PCINT9; // pcint active pins Pb0 Pb1
 }
+void initialize_TIMER0(){ // trigger delay timer
+  TCCR0A= 0x00; //Normal port operation, OC0A disconnected. Normal
+  TCCR0B= 0x03; //clkT0S/32 (from prescaler)4us tick
+  //TCNT0 read from here;
+  TIMSK0|= 1<<TOIE0; 
+}
+void initialize_TIMER1(){ // meter timer
+  TCCR1A= 0x00; //Normal port operation, OC0A disconnected. Normal
+  TCCR1B= 0x02; //clkT0S/8 (from prescaler)1us tick
+  //TCNT1 read from here;
+  TIMSK1|= 1<<TOIE1; 
+}
+
+void delay_us(char delay){
+  for(char i=0;i<delay;i++){
+    _NOP();
+    }
+}
+
 int main(void)
 { 
   RSTLBL:initGlobalVars();
@@ -148,8 +184,9 @@ int main(void)
   initialize_UART();
   //initialize_ADC();
   initialize_GPIO();
-//  initPCINT();
-
+  initialize_PCINT();
+  initialize_TIMER0();
+  initialize_TIMER1();
   int hrcnt=0;
   char rxbuf=0;
   int effHr,hrbeeps;
@@ -184,7 +221,7 @@ int main(void)
           }
           else if(CK_CMD_CONT(rxbuf) && ForMe(rxbuf)){// process cont command
             digitalWrite(GPIO3,HIGH);
-            delayMicroseconds(50);
+            delay_us(50);
             digitalWrite(GPIO3,HIGH);
           }
           else if(CK_CMD_RST(rxbuf) && ForMe(rxbuf)){
@@ -194,7 +231,7 @@ int main(void)
 //            while(1);//let code die here untill resets
               wdt_disable();
               initialize_GPIO();
-              delayMicroseconds(50);
+              delay_us(50);
               goto RSTLBL;
           }
           else if(CK_CMD_PING(rxbuf) && ForMe(rxbuf)){
@@ -205,34 +242,63 @@ int main(void)
          
         }
       }
-      digitalWrite(HBLED,!digitalRead(HBLED));
+      digitalWrite(HBLED,!digitalRead(HBLED));  
+        
     }
-//    digitalWrite(GPIO3,!digitalRead(GPIO3));
-//    digitalWrite(GPIO4,!digitalRead(GPIO4));
-
-
   }
-
 }
 
-ISR(PCINT0_vect){
+
+ISR(TIMER1_OVF_vect) {
+  
+}
+ISR(TIMER0_OVF_vect) {
+  
+  if(T0Action == NHIGH){
+    digitalWrite(OUTN,LOW);//low active
+    TCNT0=255-stageConfig.onDelayP;
+    T0Action = PHIGH;
+   }
+   else if(T0Action == PHIGH){
+    digitalWrite(OUTP,HIGH);//low active
+    T0Action = NONE;
+   }
+   else if(T0Action == PNLOW){
+    digitalWrite(OUTP,LOW);//low active
+    digitalWrite(OUTN,HIGH);//low active
+    T0Action = NONE;
+   }
+   else{
+    }
+}
+
+ISR(PCINT1_vect){
+  // 7 us react time, not bad
   char newPB=PINB;
-  if((((lastPB^newPB)&0x03) == 0x01) & ((newPB&0x03) ==0x01))//T1 went high
-  {
-    digitalWrite(OUTN,LOW);
+  if(((lastPB^newPB)&0x03) == 0x01){
+    if((newPB&0x01) == 0x01){
+      //Trig 1 high
+      TCNT1=0; 
+       digitalWrite(GPIO4,LOW);  
+    }
+    else{
+      //Trig 1 low
+    }
   }
-  else if((((lastPB^newPB)&0x03) == 0x01) & ((newPB&0x03) ==0x00))// T1 went low
-  {
-    digitalWrite(OUTN,HIGH);
+  else if(((lastPB^newPB)&0x03) == 0x02){
+    if((newPB&0x02) == 0x02){
+        //Trig 2 high
+        dtSpeed=TCNT1;
+        TCNT0=255-stageConfig.onDelayN;
+        T0Action=NHIGH;
+    }
+    else{
+        //Trig 2 low
+        TCNT0=255-stageConfig.offDelay;
+        T0Action=PNLOW;
+    }  
   }
-  else if((((lastPB^newPB)&0x03) == 0x02) & ((newPB&0x03) ==0x02))// T2 went high
-  {
-    digitalWrite(OUTP,LOW);
-  }
-  else if((((lastPB^newPB)&0x03) == 0x02) & ((newPB&0x03) ==0x00))// T2 went low
-  {
-    digitalWrite(OUTP,HIGH);
-  }
+  
   else{// nothing changed
       return;
   } 
