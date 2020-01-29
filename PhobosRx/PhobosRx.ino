@@ -27,10 +27,14 @@
 #define CK_CMD_RST(data) (CMD_RST==(data&0x0f) ? 1:0)
 #define CMD_ENUM 0x03
 #define CK_CMD_ENUM(data) (CMD_ENUM==(data&0x0f) ? 1:0)
-#define CMD_ARM 0x03
-#define CK_CMD_ARM(data) (CMD_ARM==(data&0x0f) ? 1:0)
 #define CMD_CONT 0x04// continue enum
 #define CK_CMD_CONT(data) (CMD_CONT==(data&0x0f) ? 1:0)
+#define CMD_ARM 0x05
+#define CK_CMD_ARM(data) (CMD_ARM==(data&0x0f) ? 1:0)
+#define CMD_DISARM 0x06
+#define CK_CMD_DISARM(data) (CMD_DISARM==(data&0x0f) ? 1:0)
+#define CMD_STREAM 0x07
+#define CK_CMD_STREAM(data) (CMD_STREAM==(data&0x0f) ? 1:0)
 
 #define TxPack(TxADDR,TxCMD) ((char)(TxADDR<<4)+TxCMD)
 
@@ -40,12 +44,15 @@
 #define _NOP() do { __asm__ __volatile__ ("nop"); } while (0)
 
 /// GLOBAL VARIABLES
-static volatile char Eight_Bit_ADC_Value;
+
 char stage_id;
 char recieved_data;
-int heartrate;
+unsigned int heartrate;
 int HBstate;
 char lastPB;
+
+char ADCBuff[64]={0x00};
+char ADCCtr=0;
 
 unsigned int dtSpeed;
 
@@ -64,6 +71,11 @@ enum T0Actions{
 };
 enum T0Actions T0Action=NONE;
 
+enum stageStates{
+  _IDLE,
+  _ARMED,
+};
+enum stageStates stageStage=_IDLE;
 // Function Pototype
 void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3")));
 // Function Implementation
@@ -76,12 +88,26 @@ void wdt_init(void)
 
 void initialize_ADC(void)
 {
+//  ADCSRA |= 0 << ADPS2 | 1 << ADPS1 | 0 << ADPS0;// /16 prescaler
+//  ADMUX |= 1<<REFS1 | 1<<REFS0 | 1 << ADLAR | 1 << MUX1 | 1 << MUX0;//2.56 internal ref, PA3 pin as input
+////  ADCSRA |= 1 << ADIE;
+//  ADCSRB |= 0x00;
+//  ADCSRA = 0xC0;//|= 1 << ADEN;
+//  sei();
+//  ADCSRA |= 1 << ADSC;
   ADCSRA |= 1 << ADPS2;
-  ADMUX |= 1 << ADLAR | 1 << MUX1 | 1 << MUX0;
+  
+  ADMUX |= 1<<REFS0| 1 << ADLAR | 1 << MUX1 | 1 << MUX0;
+  
   ADCSRA |= 1 << ADIE;
+  
   ADCSRA |= 1 << ADEN;
-  //  sei();
-  ADCSRA |= 1 << ADSC;
+  ADCSRB=0x00;
+
+  ADCSRA |= 0 << ADPS2 | 0 << ADPS1 | 0 << ADPS0;// /16 prescaler
+  
+  sei();
+  
 }
 
 void initialize_UART(void)
@@ -97,8 +123,9 @@ void initialize_UART(void)
   LINBRRH = (BAUD_PRESCALER >> 8);
   LINBRRL = BAUD_PRESCALER;
   
-  LINCR |= 1 << LENA | 0 << LCMD0 | 1 << LCMD1 | 1 << LCMD2;
-    LINENIR=0x03;
+  LINCR |= 1 << LENA  | 1 << LCMD1 | 1 << LCMD2;
+  LINCR &= ~(1<< LCMD0);
+  LINENIR=0x01;
 
 }
 
@@ -131,7 +158,7 @@ void txen(int en){
   if(en==1)
     LINCR |= 1 << LCMD0;
   else{
-    LINCR &= ~(1<< LCMD0);
+    initialize_UART();
     pinMode(TXD, INPUT);
   }
 }
@@ -145,7 +172,7 @@ void sendByte(char c){
 void initGlobalVars(){
   stage_id=0;
   recieved_data=0x00;
-  heartrate=2000;
+  heartrate=65535;
   HBstate=1;
   lastPB=0x00;
 }
@@ -174,6 +201,12 @@ void delay_us(char delay){
     }
 }
 
+void armStage(){
+  PCICR = 1<<PCIE1; // pcint enable, bank 1 aka port b
+}
+void disarmStage(){
+  PCICR = 0x00; 
+}
 int main(void)
 { 
   RSTLBL:initGlobalVars();
@@ -182,12 +215,12 @@ int main(void)
 
   sei();
   initialize_UART();
-  //initialize_ADC();
+  initialize_ADC();
   initialize_GPIO();
   initialize_PCINT();
   initialize_TIMER0();
   initialize_TIMER1();
-  int hrcnt=0;
+  unsigned int hrcnt=0;
   char rxbuf=0;
   int effHr,hrbeeps;
   char SWRESET=false;
@@ -237,7 +270,25 @@ int main(void)
           else if(CK_CMD_PING(rxbuf) && ForMe(rxbuf)){
             sendByte(TxPack(stage_id,CMD_ACK));
           }
-
+          else if(CK_CMD_ARM(rxbuf) && ForMe(rxbuf)){
+            armStage();
+            sendByte(TxPack(stage_id,CMD_ACK));
+          }
+          else if(CK_CMD_DISARM(rxbuf) && ForMe(rxbuf)){
+            disarmStage();
+            sendByte(TxPack(stage_id,CMD_ACK));
+          }
+          else if(CK_CMD_STREAM(rxbuf) && ForMe(rxbuf)){
+            sendByte(TxPack(stage_id,CMD_ACK));
+            sendByte(ADCCtr);
+            txen(1);
+            for (char i=0;i<ADCCtr;i++){
+              while (LINSIR & (1 << LBUSY)); 
+              LINDAT=ADCBuff[i];
+            }
+            txen(0);
+          }
+          
           rxbuf=0x00;
          
         }
@@ -255,6 +306,9 @@ ISR(TIMER1_OVF_vect) {
 ISR(TIMER0_OVF_vect) {
   
   if(T0Action == NHIGH){
+    ADCCtr=0;
+    ADCSRA |= 1 << ADIE;// enable ADC Int here
+    ADCSRA |= 1 << ADSC;
     digitalWrite(OUTN,LOW);//low active
     TCNT0=255-stageConfig.onDelayP;
     T0Action = PHIGH;
@@ -266,6 +320,7 @@ ISR(TIMER0_OVF_vect) {
    else if(T0Action == PNLOW){
     digitalWrite(OUTP,LOW);//low active
     digitalWrite(OUTN,HIGH);//low active
+    ADCSRA &= ~(1 << ADIE);// disable ADC Int here
     T0Action = NONE;
    }
    else{
@@ -298,20 +353,21 @@ ISR(PCINT1_vect){
         T0Action=PNLOW;
     }  
   }
+  else{} // nothing changed
   
-  else{// nothing changed
-      return;
-  } 
   lastPB=newPB; 
 }
 
 ISR (LIN_TC_vect)
 { 
   recieved_data = LINDAT;      
+  digitalWrite(GPIO4,!digitalRead(GPIO4));
 }
 
 ISR(ADC_vect)
 {
-  Eight_Bit_ADC_Value = ADCH;
+  digitalWrite(GPIO4,!digitalRead(GPIO4));
+  ADCCtr++;
+  ADCBuff[ADCCtr]=ADCH;
   ADCSRA |= 1 << ADSC;
 }
