@@ -39,6 +39,10 @@
 #define CK_CMD_METER(data) (CMD_METER==(data&0x0f) ? 1:0)
 #define CMD_FIRE 0x09
 #define CK_CMD_FIRE(data) (CMD_FIRE==(data&0x0f) ? 1:0)
+#define CMD_REGR 0x0a
+#define CK_CMD_REGR(data) (CMD_REGR==(data&0x0f) ? 1:0)
+#define CMD_REGW 0x0b
+#define CK_CMD_REGW(data) (CMD_REGW==(data&0x0f) ? 1:0)
 
 #define TxPack(TxADDR,TxCMD) ((char)(TxADDR<<4)+TxCMD)
 
@@ -59,7 +63,7 @@ char ADCBuff[128]={0x00};
 unsigned int ADCCtr=0;
 
 unsigned int dtSpeed;
-
+bool newDataAval;
 // settings vars
 struct config{ // number is num of 4us counts(256=1us)
   unsigned char onDelayN=75;  // 75 = 300us
@@ -87,6 +91,17 @@ enum stageStates{
   _ARMED,
 };
 enum stageStates stageState=_IDLE;
+
+enum phyStates{
+  _CMD,
+  _ADDR,
+  _REG8,
+  _REG16,
+  _STREAM,
+};
+enum phyStates phyState=_CMD;
+
+
 // Function Pototype
 void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3")));
 // Function Implementation
@@ -97,6 +112,34 @@ void wdt_init(void)
     return;
 }
 
+void writeReg(unsigned char reg , unsigned char data){
+  switch(reg){
+    case 0x01: stageConfig.onDelayN=data;
+      break;
+    case 0x02: stageConfig.onDelayP=data;
+      break;
+    case 0x03: stageConfig.offDelay=data;
+      break;
+    case 0x04: stageConfig.safetyTO=data;
+      break;
+    default:
+      break;
+  }
+}
+void readReg(unsigned char reg , unsigned char data){
+  switch(reg){
+    case 0x01: return stageConfig.onDelayN;
+      break;
+    case 0x02: return stageConfig.onDelayP;
+      break;
+    case 0x03: return stageConfig.offDelay;
+      break;
+    case 0x04: return stageConfig.safetyTO;
+      break;
+    default:
+      break;
+  }
+}
 void initialize_ADC(void)
 {
 //  ADCSRA |= 0 << ADPS2 | 1 << ADPS1 | 0 << ADPS0;// /16 prescaler
@@ -183,10 +226,14 @@ void sendByte(char c){
 void initGlobalVars(){
   stage_id=0;
   recieved_data=0x00;
-  heartrate=65535;
+  heartrate=35535;
   HBstate=1;
   lastPB=0x00;
   estopCtr=0;
+  stageState=_IDLE;
+  phyState=_CMD;
+  newDataAval=false;
+
 }
 
 void initialize_PCINT(){
@@ -244,80 +291,89 @@ int main(void)
   //wait untill I1 goes high
 
   wdt_enable(WDTO_60MS);
+  digitalWrite(HBLED,!digitalRead(HBLED));  
   while(1)
   {
-    for(hrbeeps=0;hrbeeps<=2*stage_id+1;hrbeeps++){
-      if(hrbeeps>=2*stage_id+1)
-          effHr=heartrate;
-      else
-          effHr=heartrate/stage_id/2;
+    for(hrbeeps=0;hrbeeps<5*stage_id+1;hrbeeps++){
+
       ////// ^HR control, letting LED indicate which stage it is
       
-      for(hrcnt=0;hrcnt<effHr;hrcnt++){
+      for(hrcnt=0;hrcnt<heartrate;hrcnt++){
         //_NOP();
         if(~SWRESET)
           wdt_reset();//feeding WDT 
-        if(recieved_data!=0x00){
+        if(newDataAval){
+          newDataAval=false;
           rxbuf=recieved_data;
-          recieved_data=0x00;
-          if(CK_CMD_ENUM(rxbuf) && (stage_id==0)){
-         // if((recieved_data==0x13) && (stage_id==0)){
-            digitalWrite(INTLED,LOW);
-            stage_id=SID(rxbuf);
-            sendByte(TxPack(stage_id,CMD_ACK));   
+
+          if(phyState==_ADDR){
+            
           }
-          else if(CK_CMD_CONT(rxbuf) && ForMe(rxbuf)){// process cont command
-            digitalWrite(GPIO3,HIGH);
-            delay_us(50);
-            digitalWrite(GPIO3,HIGH);
-          }
-          else if(CK_CMD_RST(rxbuf) && ForMe(rxbuf)){
-//            rxbuf=0x00;
-//            recieved_data;
-//            LINENIR=0x00;
-//            while(1);//let code die here untill resets
-              wdt_disable();
-              initialize_GPIO();
+          else if(phyState==_CMD)
+          {
+            
+            if(CK_CMD_ENUM(rxbuf) && (stage_id==0)){
+           // if((recieved_data==0x13) && (stage_id==0)){
+              digitalWrite(INTLED,LOW);
+              stage_id=SID(rxbuf);
+              sendByte(TxPack(stage_id,CMD_ACK));   
+            }
+            else if(CK_CMD_CONT(rxbuf) && ForMe(rxbuf)){// process cont command
+              digitalWrite(GPIO3,HIGH);
               delay_us(50);
-              goto RSTLBL;
-          }
-          else if(CK_CMD_PING(rxbuf) && ForMe(rxbuf)){
-            sendByte(TxPack(stage_id,CMD_ACK));
-          }
-          else if(CK_CMD_ARM(rxbuf) && ForMe(rxbuf)){
-            armStage();
-            sendByte(TxPack(stage_id,CMD_ACK));
-          }
-          else if(CK_CMD_DISARM(rxbuf) && ForMe(rxbuf)){
-            disarmStage();
-            sendByte(TxPack(stage_id,CMD_ACK));
-          }
-          else if(CK_CMD_STREAM(rxbuf) && ForMe(rxbuf)){
-            sendByte(TxPack(stage_id,CMD_ACK));
-            sendByte(ADCCtr);
-            txen(1);
-            for (char i=0;i<ADCCtr;i++){
-              while (LINSIR & (1 << LBUSY)); 
-              LINDAT=ADCBuff[i];
+              digitalWrite(GPIO3,LOW);
             }
-            txen(0);
-          }
-          else if(CK_CMD_METER(rxbuf) && ForMe(rxbuf)){
-            sendByte(TxPack(stage_id,CMD_ACK));
-            sendByte(dtSpeed>>8);
-            sendByte(dtSpeed&0xff);
-          }
-          else if(CK_CMD_FIRE(rxbuf) && ForMe(rxbuf)){
-            digitalWrite(GPIO4,!digitalRead(GPIO4));
-            if(stageState==_ARMED){
+            else if(CK_CMD_RST(rxbuf) && ForMe(rxbuf)){
+  //            rxbuf=0x00;
+  //            recieved_data;
+  //            LINENIR=0x00;
+  //            while(1);//let code die here untill resets
+                wdt_disable();
+                initialize_GPIO();
+                delay_us(50);
+                goto RSTLBL;
+            }
+            else if(CK_CMD_PING(rxbuf) && ForMe(rxbuf)){
               sendByte(TxPack(stage_id,CMD_ACK));
-              startDischarge();
             }
-          }
-          rxbuf=0x00;       
+            else if(CK_CMD_ARM(rxbuf) && ForMe(rxbuf)){
+              armStage();
+              sendByte(TxPack(stage_id,CMD_ACK));
+            }
+            else if(CK_CMD_DISARM(rxbuf) && ForMe(rxbuf)){
+              disarmStage();
+              sendByte(TxPack(stage_id,CMD_ACK));
+            }
+            else if(CK_CMD_STREAM(rxbuf) && ForMe(rxbuf)){
+              sendByte(TxPack(stage_id,CMD_ACK));
+              sendByte(ADCCtr);
+              txen(1);
+              for (char i=0;i<ADCCtr;i++){
+                while (LINSIR & (1 << LBUSY)); 
+                LINDAT=ADCBuff[i];
+              }
+              txen(0);
+            }
+            else if(CK_CMD_METER(rxbuf) && ForMe(rxbuf)){
+              sendByte(TxPack(stage_id,CMD_ACK));
+              sendByte(dtSpeed>>8);
+              sendByte(dtSpeed&0xff);
+            }
+            else if(CK_CMD_FIRE(rxbuf) && ForMe(rxbuf)){
+              digitalWrite(GPIO4,!digitalRead(GPIO4));
+              if(stageState==_ARMED){
+                sendByte(TxPack(stage_id,CMD_ACK));
+                startDischarge();
+              }
+            }
+            rxbuf=0x00;    
+          }   
         }
       }
-      digitalWrite(HBLED,!digitalRead(HBLED));  
+      if (hrbeeps<2*stage_id)
+      {
+        digitalWrite(HBLED,!digitalRead(HBLED));  
+      }
         
     }
   }
@@ -415,7 +471,7 @@ ISR(PCINT1_vect){
 ISR (LIN_TC_vect)
 { 
   recieved_data = LINDAT;      
-  
+  newDataAval=true;
 }
 
 ISR(ADC_vect)
