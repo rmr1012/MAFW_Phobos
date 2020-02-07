@@ -35,6 +35,10 @@
 #define CK_CMD_DISARM(data) (CMD_DISARM==(data&0x0f) ? 1:0)
 #define CMD_STREAM 0x07
 #define CK_CMD_STREAM(data) (CMD_STREAM==(data&0x0f) ? 1:0)
+#define CMD_METER 0x08
+#define CK_CMD_METER(data) (CMD_METER==(data&0x0f) ? 1:0)
+#define CMD_FIRE 0x09
+#define CK_CMD_FIRE(data) (CMD_FIRE==(data&0x0f) ? 1:0)
 
 #define TxPack(TxADDR,TxCMD) ((char)(TxADDR<<4)+TxCMD)
 
@@ -50,9 +54,9 @@ char recieved_data;
 unsigned int heartrate;
 int HBstate;
 char lastPB;
-
-char ADCBuff[64]={0x00};
-char ADCCtr=0;
+unsigned char estopCtr;
+char ADCBuff[128]={0x00};
+unsigned int ADCCtr=0;
 
 unsigned int dtSpeed;
 
@@ -61,6 +65,7 @@ struct config{ // number is num of 4us counts(256=1us)
   unsigned char onDelayN=75;  // 75 = 300us
   unsigned char onDelayP=25;   //p is after N, how long?
   unsigned char offDelay=100;  //off >> onD + onP - expected meter PW
+  unsigned char safetyTO=20;// in ms
 };
 struct config stageConfig;
 enum T0Actions{
@@ -71,11 +76,17 @@ enum T0Actions{
 };
 enum T0Actions T0Action=NONE;
 
+enum T1Actions{
+  ESTOP,
+  T1NONE
+};
+enum T1Actions T1Action=T1NONE;
+
 enum stageStates{
   _IDLE,
   _ARMED,
 };
-enum stageStates stageStage=_IDLE;
+enum stageStates stageState=_IDLE;
 // Function Pototype
 void wdt_init(void) __attribute__((naked)) __attribute__((section(".init3")));
 // Function Implementation
@@ -131,7 +142,7 @@ void initialize_UART(void)
 
 void initialize_GPIO(void){
   pinMode(HBLED, OUTPUT);
-  digitalWrite(HBLED, HIGH);
+  digitalWrite(HBLED, LOW);
   
   pinMode(INTLED, OUTPUT);
   digitalWrite(INTLED, HIGH);
@@ -175,11 +186,12 @@ void initGlobalVars(){
   heartrate=65535;
   HBstate=1;
   lastPB=0x00;
+  estopCtr=0;
 }
 
 void initialize_PCINT(){
   
-  PCICR|= 1<<PCIE1; // pcint enable, bank 1 aka port b
+//  PCICR|= 1<<PCIE1; // pcint enable, bank 1 aka port b , comment for for default disarm
   PCMSK1|= 0x03;//1<<PCINT8 | 1<<PCINT9; // pcint active pins Pb0 Pb1
 }
 void initialize_TIMER0(){ // trigger delay timer
@@ -203,9 +215,11 @@ void delay_us(char delay){
 
 void armStage(){
   PCICR = 1<<PCIE1; // pcint enable, bank 1 aka port b
+  stageState=_ARMED;
 }
 void disarmStage(){
   PCICR = 0x00; 
+  stageState=_IDLE;
 }
 int main(void)
 { 
@@ -288,9 +302,19 @@ int main(void)
             }
             txen(0);
           }
-          
-          rxbuf=0x00;
-         
+          else if(CK_CMD_METER(rxbuf) && ForMe(rxbuf)){
+            sendByte(TxPack(stage_id,CMD_ACK));
+            sendByte(dtSpeed>>8);
+            sendByte(dtSpeed&0xff);
+          }
+          else if(CK_CMD_FIRE(rxbuf) && ForMe(rxbuf)){
+            digitalWrite(GPIO4,!digitalRead(GPIO4));
+            if(stageState==_ARMED){
+              sendByte(TxPack(stage_id,CMD_ACK));
+              startDischarge();
+            }
+          }
+          rxbuf=0x00;       
         }
       }
       digitalWrite(HBLED,!digitalRead(HBLED));  
@@ -298,13 +322,41 @@ int main(void)
     }
   }
 }
-
+void startDischarge(){
+  TCNT0=255-stageConfig.onDelayN;
+  T0Action=NHIGH;
+  TCNT1=65535-1000;
+  T1Action = ESTOP;
+}
+void endDischarge(){
+  TCNT0=255-stageConfig.offDelay;
+  T0Action=PNLOW;  
+  disarmStage();
+}
+void estop(){
+  digitalWrite(OUTP,LOW);//low active
+  digitalWrite(OUTN,HIGH);//low active
+  ADCSRA &= ~(1 << ADIE);// disable ADC Int here
+  T0Action = NONE;
+  T1Action = T1NONE;
+  disarmStage();
+  
+}
 
 ISR(TIMER1_OVF_vect) {
   
+  if(T1Action == ESTOP){
+    digitalWrite(GPIO4,!digitalRead(GPIO4));
+    TCNT1=65535-1000;
+    estopCtr++;
+    if(estopCtr>=stageConfig.safetyTO){
+      estop();//pull estop
+      estopCtr=0;
+    }
+  }
 }
 ISR(TIMER0_OVF_vect) {
-  
+  TCNT0=0;
   if(T0Action == NHIGH){
     ADCCtr=0;
     ADCSRA |= 1 << ADIE;// enable ADC Int here
@@ -324,17 +376,17 @@ ISR(TIMER0_OVF_vect) {
     T0Action = NONE;
    }
    else{
-    }
+   }
 }
 
 ISR(PCINT1_vect){
+  
   // 7 us react time, not bad
   char newPB=PINB;
   if(((lastPB^newPB)&0x03) == 0x01){
     if((newPB&0x01) == 0x01){
       //Trig 1 high
-      TCNT1=0; 
-       digitalWrite(GPIO4,LOW);  
+      TCNT1=0;
     }
     else{
       //Trig 1 low
@@ -344,13 +396,15 @@ ISR(PCINT1_vect){
     if((newPB&0x02) == 0x02){
         //Trig 2 high
         dtSpeed=TCNT1;
-        TCNT0=255-stageConfig.onDelayN;
-        T0Action=NHIGH;
+        if (stage_id!=1)
+        {
+          startDischarge();
+        }
+        
     }
     else{
         //Trig 2 low
-        TCNT0=255-stageConfig.offDelay;
-        T0Action=PNLOW;
+        endDischarge();
     }  
   }
   else{} // nothing changed
@@ -361,13 +415,15 @@ ISR(PCINT1_vect){
 ISR (LIN_TC_vect)
 { 
   recieved_data = LINDAT;      
-  digitalWrite(GPIO4,!digitalRead(GPIO4));
+  
 }
 
 ISR(ADC_vect)
 {
-  digitalWrite(GPIO4,!digitalRead(GPIO4));
+  
   ADCCtr++;
-  ADCBuff[ADCCtr]=ADCH;
+  if(ADCCtr<=sizeof(ADCBuff)){
+    ADCBuff[ADCCtr]=ADCH;
+  }
   ADCSRA |= 1 << ADSC;
 }
