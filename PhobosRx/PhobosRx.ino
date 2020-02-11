@@ -94,9 +94,9 @@ enum stageStates stageState=_IDLE;
 
 enum phyStates{
   _CMD,
-  _ADDR,
-  _REG8,
-  _REG16,
+  _ADDRR,
+  _ADDRW,
+  _DATAW,
   _STREAM,
 };
 enum phyStates phyState=_CMD;
@@ -126,7 +126,7 @@ void writeReg(unsigned char reg , unsigned char data){
       break;
   }
 }
-void readReg(unsigned char reg , unsigned char data){
+unsigned char readReg(unsigned char reg ){
   switch(reg){
     case 0x01: return stageConfig.onDelayN;
       break;
@@ -285,7 +285,7 @@ int main(void)
   char rxbuf=0;
   int effHr,hrbeeps;
   char SWRESET=false;
-  
+  unsigned char regAddr,regData;
   while(digitalRead(GPIO1)==0);
   sendByte(TxPack(stage_id,CMD_PING));
   //wait untill I1 goes high
@@ -306,8 +306,20 @@ int main(void)
           newDataAval=false;
           rxbuf=recieved_data;
 
-          if(phyState==_ADDR){
-            
+          if(phyState==_ADDRR){
+            regAddr=rxbuf;
+            sendByte(readReg(regAddr));
+            phyState=_CMD;
+          }
+          else if(phyState==_ADDRW){
+            regAddr=rxbuf;
+            phyState=_DATAW;
+          }
+          else if(phyState==_DATAW){
+            regData=rxbuf;
+            writeReg(regAddr,regData);
+            phyState=_CMD;
+            sendByte(TxPack(stage_id,CMD_ACK)); 
           }
           else if(phyState==_CMD)
           {
@@ -365,6 +377,14 @@ int main(void)
                 sendByte(TxPack(stage_id,CMD_ACK));
                 startDischarge();
               }
+            }
+            else if(CK_CMD_REGR(rxbuf) && ForMe(rxbuf)){
+              sendByte(TxPack(stage_id,CMD_ACK));
+              phyState=_ADDRR;
+            }
+           else if(CK_CMD_REGW(rxbuf) && ForMe(rxbuf)){
+              sendByte(TxPack(stage_id,CMD_ACK));
+              phyState=_ADDRW;
             }
             rxbuf=0x00;    
           }   
