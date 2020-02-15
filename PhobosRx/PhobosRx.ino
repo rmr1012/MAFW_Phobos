@@ -19,6 +19,12 @@
 #define OUTP 12
 #define ICOIL 3
 
+
+#define REG_ONDELAYN 1
+#define REG_ONDELAYP 2
+#define REG_OFFDELAY 3
+#define REG_SAFETYTO 4
+
 #define CMD_PING 0x0f
 #define CK_CMD_PING(data) (CMD_PING==(data&0x0f) ? 1:0)
 #define CMD_ACK 0x01
@@ -43,6 +49,9 @@
 #define CK_CMD_REGR(data) (CMD_REGR==(data&0x0f) ? 1:0)
 #define CMD_REGW 0x0b
 #define CK_CMD_REGW(data) (CMD_REGW==(data&0x0f) ? 1:0)
+#define CMD_OBSTACLE 0x0c
+#define CK_CMD_OBSTACLE(data) (CMD_OBSTACLE==(data&0x0f) ? 1:0)
+
 
 #define TxPack(TxADDR,TxCMD) ((char)(TxADDR<<4)+TxCMD)
 
@@ -61,11 +70,12 @@ char lastPB;
 unsigned char estopCtr;
 char ADCBuff[128]={0x00};
 unsigned int ADCCtr=0;
+unsigned char skipByte=0;
 
 unsigned int dtSpeed;
 bool newDataAval;
 // settings vars
-struct config{ // number is num of 4us counts(256=1us)
+struct config{ // number is num of 4us counts(256=1ms)
   unsigned char onDelayN=75;  // 75 = 300us
   unsigned char onDelayP=25;   //p is after N, how long?
   unsigned char offDelay=100;  //off >> onD + onP - expected meter PW
@@ -114,13 +124,13 @@ void wdt_init(void)
 
 void writeReg(unsigned char reg , unsigned char data){
   switch(reg){
-    case 0x01: stageConfig.onDelayN=data;
+    case REG_ONDELAYN: stageConfig.onDelayN=data;
       break;
-    case 0x02: stageConfig.onDelayP=data;
+    case REG_ONDELAYP: stageConfig.onDelayP=data;
       break;
-    case 0x03: stageConfig.offDelay=data;
+    case REG_OFFDELAY: stageConfig.offDelay=data;
       break;
-    case 0x04: stageConfig.safetyTO=data;
+    case REG_SAFETYTO: stageConfig.safetyTO=data;
       break;
     default:
       break;
@@ -128,13 +138,13 @@ void writeReg(unsigned char reg , unsigned char data){
 }
 unsigned char readReg(unsigned char reg ){
   switch(reg){
-    case 0x01: return stageConfig.onDelayN;
+    case REG_ONDELAYN: return stageConfig.onDelayN;
       break;
-    case 0x02: return stageConfig.onDelayP;
+    case REG_ONDELAYP: return stageConfig.onDelayP;
       break;
-    case 0x03: return stageConfig.offDelay;
+    case REG_OFFDELAY: return stageConfig.offDelay;
       break;
-    case 0x04: return stageConfig.safetyTO;
+    case REG_SAFETYTO: return stageConfig.safetyTO;
       break;
     default:
       break;
@@ -233,6 +243,7 @@ void initGlobalVars(){
   stageState=_IDLE;
   phyState=_CMD;
   newDataAval=false;
+  skipByte=0;
 
 }
 
@@ -243,7 +254,7 @@ void initialize_PCINT(){
 }
 void initialize_TIMER0(){ // trigger delay timer
   TCCR0A= 0x00; //Normal port operation, OC0A disconnected. Normal
-  TCCR0B= 0x03; //clkT0S/32 (from prescaler)4us tick
+  TCCR0B= 0x04; //clkT0S/64 (from prescaler)8us tick
   //TCNT0 read from here;
   TIMSK0|= 1<<TOIE0; 
 }
@@ -378,13 +389,28 @@ int main(void)
                 startDischarge();
               }
             }
-            else if(CK_CMD_REGR(rxbuf) && ForMe(rxbuf)){
-              sendByte(TxPack(stage_id,CMD_ACK));
-              phyState=_ADDRR;
+            else if(CK_CMD_REGR(rxbuf)){
+              if(ForMe(rxbuf)){
+                sendByte(TxPack(stage_id,CMD_ACK));
+                phyState=_ADDRR;
+              }
+              else{
+                skipByte=1;
+              }     
             }
-           else if(CK_CMD_REGW(rxbuf) && ForMe(rxbuf)){
+           else if(CK_CMD_REGW(rxbuf)){
+              if(ForMe(rxbuf)){
+                sendByte(TxPack(stage_id,CMD_ACK));
+                phyState=_ADDRW;
+              }
+              else{
+                skipByte=2;
+              }     
+            }
+           else if(CK_CMD_OBSTACLE(rxbuf) && ForMe(rxbuf)){
               sendByte(TxPack(stage_id,CMD_ACK));
-              phyState=_ADDRW;
+//              sendByte(digitalRead(TRIGGER1)<<1 | digitalRead(TRIGGER2));
+              sendByte(PINB);
             }
             rxbuf=0x00;    
           }   
@@ -490,7 +516,11 @@ ISR(PCINT1_vect){
 
 ISR (LIN_TC_vect)
 { 
-  recieved_data = LINDAT;      
+  recieved_data = LINDAT;    
+  if(skipByte){
+    skipByte--;
+    return;
+  }  
   newDataAval=true;
 }
 
